@@ -108,7 +108,7 @@ def check_git_status():
         print(e)
 
 
-def check_python(minimum='3.7.0', required=True):
+def check_python(minimum='3.6.0', required=True):
     # Check current python version vs. required python version
     current = platform.python_version()
     result = pkg.parse_version(current) >= pkg.parse_version(minimum)
@@ -315,25 +315,41 @@ def coco80_to_coco91_class():  # converts 80-index (val2014) to 91-index (paper)
     return x
 
 
+# def xyxy2xywh(x):
+#     # Convert nx4 boxes from [x1, y1, x2, y2] to [x, y, w, h] where xy1=top-left, xy2=bottom-right
+#     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+#     y[:, 0] = (x[:, 0] + x[:, 2]) / 2  # x center
+#     y[:, 1] = (x[:, 1] + x[:, 3]) / 2  # y center
+#     y[:, 2] = x[:, 2] - x[:, 0]  # width
+#     y[:, 3] = x[:, 3] - x[:, 1]  # height
+#     return y
+
 def xyxy2xywh(x):
     # Convert nx4 boxes from [x1, y1, x2, y2] to [x, y, w, h] where xy1=top-left, xy2=bottom-right
     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
-    y[:, 0] = (x[:, 0] + x[:, 2]) / 2  # x center
-    y[:, 1] = (x[:, 1] + x[:, 3]) / 2  # y center
-    y[:, 2] = x[:, 2] - x[:, 0]  # width
-    y[:, 3] = x[:, 3] - x[:, 1]  # height
+    y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
+    y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
+    y[..., 2] = x[..., 2] - x[..., 0]  # width
+    y[..., 3] = x[..., 3] - x[..., 1]  # height
     return y
 
+# def xywh2xyxy(x):
+#     # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
+#     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+#     y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
+#     y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
+#     y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
+#     y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
+#     return y
 
 def xywh2xyxy(x):
     # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
-    y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
-    y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
-    y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
-    y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
+    y[..., 0] = x[..., 0] - x[..., 2] / 2  # top left x
+    y[..., 1] = x[..., 1] - x[..., 3] / 2  # top left y
+    y[..., 2] = x[..., 0] + x[..., 2] / 2  # bottom right x
+    y[..., 3] = x[..., 1] + x[..., 3] / 2  # bottom right y
     return y
-
 
 def xywhn2xyxy(x, w=640, h=640, padw=0, padh=0):
     # Convert nx4 boxes from [x, y, w, h] normalized to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
@@ -369,6 +385,9 @@ def segments2boxes(segments):
         boxes.append([x.min(), y.min(), x.max(), y.max()])  # cls, xyxy
     return xyxy2xywh(np.array(boxes))  # cls, xywh
 
+def box_xyxy2segment(box):
+    left, top, right, bottom = box
+    return np.array([left, top, right, top, right, bottom, left, bottom]).reshape(-1, 2)
 
 def resample_segments(segments, n=1000):
     # Up-sample an (n,2) segment
