@@ -9,8 +9,7 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from models.experimental import attempt_load
-# from utils.datasets import create_dataloader
+from model import attempt_load
 from utils.coco_datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
@@ -43,7 +42,6 @@ def test(data,
          opt=None):
     # Initialize/load model and set device
     training = model is not None
-    json_file, img_path = data[task]
     if training:  # called by train.py
         device = next(model.parameters()).device  # get model device
 
@@ -89,6 +87,7 @@ def test(data,
         if device.type != 'cpu':
             model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
+        json_file, img_path = data[task]
         dataloader = create_dataloader(json_file, img_path, imgsz, batch_size, gs, opt, pad=0.5, rect=True,
                                        prefix=colorstr(f'{task}: '))[0]
 
@@ -102,8 +101,11 @@ def test(data,
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
+        # img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        img_mean = torch.Tensor([103.530, 116.280, 123.675]).view(1, 3, 1, 1).to(device)
+        img_std = torch.Tensor([57.375, 57.120, 58.395]).view(1, 3, 1, 1).to(device)
+        img = (img - img_mean) / img_std
         img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
@@ -113,15 +115,16 @@ def test(data,
             out, train_out = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
-            # Compute loss
-            if compute_loss:
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+            # # Compute loss
+            # if compute_loss:
+            #     loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
 
             # Run NMS
-            targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
+            # targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
+            targets = targets.to(device)
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
-            out = non_max_suppression(out, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls)
+            out = non_max_suppression(out, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, objectness=False)
             t1 += time_synchronized() - t
 
         # Statistics per image
@@ -152,17 +155,17 @@ def test(data,
                     with open(save_dir / 'labels' / (path.stem + '.txt'), 'a') as f:
                         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-            # W&B logging - Media Panel Plots
-            if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:  # Check for test operation
-                if wandb_logger.current_epoch % wandb_logger.bbox_interval == 0:
-                    box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
-                                 "class_id": int(cls),
-                                 "box_caption": "%s %.3f" % (names[cls], conf),
-                                 "scores": {"class_score": conf},
-                                 "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
-                    boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
-                    wandb_images.append(wandb_logger.wandb.Image(img[si], boxes=boxes, caption=path.name))
-            wandb_logger.log_training_progress(predn, path, names) if wandb_logger and wandb_logger.wandb_run else None
+            # # W&B logging - Media Panel Plots
+            # if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:  # Check for test operation
+            #     if wandb_logger.current_epoch % wandb_logger.bbox_interval == 0:
+            #         box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
+            #                      "class_id": int(cls),
+            #                      "box_caption": "%s %.3f" % (names[cls], conf),
+            #                      "scores": {"class_score": conf},
+            #                      "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
+            #         boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
+            #         wandb_images.append(wandb_logger.wandb.Image(img[si], boxes=boxes, caption=path.name))
+            # wandb_logger.log_training_progress(predn, path, names) if wandb_logger and wandb_logger.wandb_run else None
 
             # Append to pycocotools JSON dictionary
             if save_json:

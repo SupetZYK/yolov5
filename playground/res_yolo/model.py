@@ -8,9 +8,11 @@ from pathlib import Path
 
 sys.path.append(Path(__file__).parent.parent.absolute().__str__())  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
-
-from models.common import *
-from models.experimental import *
+import torch
+from torch import nn
+import math
+from models.common import autoShape
+from resnet_fpn import ResnetFPN
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
@@ -34,7 +36,7 @@ class Detect(nn.Module):
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
-        self.register_buffer('anchors', a)  # shape(nl,na,2) NOTE, later, the anchors are scaled to each layer
+        self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         self.inplace = inplace  # use in-place ops (e.g. slice assignment)
@@ -88,13 +90,16 @@ class Model(nn.Module):
         if anchors:
             logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        fpn_fs = self.yaml.get('fpn_feat_size', 256)
+        self.model = ResnetFPN(self.yaml.get('depth', 50), fpn_feat_size=fpn_fs, pretrained=True)
+        self.detect = Detect(self.yaml['nc'], self.yaml['anchors'], ch=(fpn_fs, fpn_fs, fpn_fs))
+
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         self.inplace = self.yaml.get('inplace', True)
         # logger.info([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
         # Build strides, anchors
-        m = self.model[-1]  # Detect()
+        m = self.detect
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.inplace = self.inplace
@@ -130,27 +135,8 @@ class Model(nn.Module):
         return torch.cat(y, 1), None  # augmented inference, train
 
     def forward_once(self, x, profile=False):
-        y, dt = [], []  # outputs
-        for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-
-            if profile:
-                o = thop.profile(m, inputs=(x,), verbose=False)[0] / 1E9 * 2 if thop else 0  # FLOPS
-                t = time_synchronized()
-                for _ in range(10):
-                    _ = m(x)
-                dt.append((time_synchronized() - t) * 100)
-                if m == self.model[0]:
-                    logger.info(f"{'time (ms)':>10s} {'GFLOPS':>10s} {'params':>10s}  {'module'}")
-                logger.info(f'{dt[-1]:10.2f} {o:10.2f} {m.np:10.0f}  {m.type}')
-
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
-
-        if profile:
-            logger.info('%.1fms total' % sum(dt))
-        return x
+        return self.detect(self.model(x))
+        
 
     def _descale_pred(self, p, flips, scale, img_size):
         # de-scale predictions following augmented inference (inverse operation)
@@ -172,7 +158,7 @@ class Model(nn.Module):
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
-        m = self.model[-1]  # Detect() module
+        m = self.detect
         for mi, s in zip(m.m, m.stride):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
@@ -180,7 +166,7 @@ class Model(nn.Module):
             mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
     def _print_biases(self):
-        m = self.model[-1]  # Detect() module
+        m = self.detect
         for mi in m.m:  # from
             b = mi.bias.detach().view(m.na, -1).T  # conv.bias(255) to (3,85)
             logger.info(
@@ -201,19 +187,19 @@ class Model(nn.Module):
         self.info()
         return self
 
-    def nms(self, mode=True):  # add or remove NMS module
-        present = type(self.model[-1]) is NMS  # last layer is NMS
-        if mode and not present:
-            logger.info('Adding NMS... ')
-            m = NMS()  # module
-            m.f = -1  # from
-            m.i = self.model[-1].i + 1  # index
-            self.model.add_module(name='%s' % m.i, module=m)  # add
-            self.eval()
-        elif not mode and present:
-            logger.info('Removing NMS... ')
-            self.model = self.model[:-1]  # remove
-        return self
+    # def nms(self, mode=True):  # add or remove NMS module
+    #     present = type(self.model[-1]) is NMS  # last layer is NMS
+    #     if mode and not present:
+    #         logger.info('Adding NMS... ')
+    #         m = NMS()  # module
+    #         m.f = -1  # from
+    #         m.i = self.model[-1].i + 1  # index
+    #         self.model.add_module(name='%s' % m.i, module=m)  # add
+    #         self.eval()
+    #     elif not mode and present:
+    #         logger.info('Removing NMS... ')
+    #         self.model = self.model[:-1]  # remove
+    #     return self
 
     def autoshape(self):  # add autoShape module
         logger.info('Adding autoShape... ')
@@ -225,58 +211,31 @@ class Model(nn.Module):
         model_info(self, verbose, img_size)
 
 
-def parse_model(d, ch):  # model_dict, input_channels(3)
-    logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
-    anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
-    na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
-    no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
+def attempt_load(weights, map_location=None, inplace=True):
+    from models.experimental import Ensemble
 
-    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
-        m = eval(m) if isinstance(m, str) else m  # eval strings
-        for j, a in enumerate(args):
-            try:
-                args[j] = eval(a) if isinstance(a, str) else a  # eval strings
-            except:
-                pass
+    # Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a
+    model = Ensemble()
+    for w in weights if isinstance(weights, list) else [weights]:
+        # attempt_download(w)
+        ckpt = torch.load(w, map_location=map_location)  # load
+        model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().fuse().eval())  # FP32 model
 
-        n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
-                 C3, C3TR]:
-            c1, c2 = ch[f], args[0]
-            if c2 != no:  # if not output
-                c2 = make_divisible(c2 * gw, 8)
+    # Compatibility updates
+    for m in model.modules():
+        if type(m) in [nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Model]:
+            m.inplace = inplace  # pytorch 1.7.0 compatibility
+        # elif type(m) is Conv:
+        #     m._non_persistent_buffers_set = set()  # pytorch 1.6.0 compatibility
 
-            args = [c1, c2, *args[1:]]
-            if m in [BottleneckCSP, C3, C3TR]:
-                args.insert(2, n)  # number of repeats
-                n = 1
-        elif m is nn.BatchNorm2d:
-            args = [ch[f]]
-        elif m is Concat:
-            c2 = sum([ch[x] for x in f])
-        elif m is Detect:
-            args.append([ch[x] for x in f])
-            if isinstance(args[1], int):  # number of anchors
-                args[1] = [list(range(args[1] * 2))] * len(f)
-        elif m is Contract:
-            c2 = ch[f] * args[0] ** 2
-        elif m is Expand:
-            c2 = ch[f] // args[0] ** 2
-        else:
-            c2 = ch[f]
-
-        m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module
-        t = str(m)[8:-2].replace('__main__.', '')  # module type
-        np = sum([x.numel() for x in m_.parameters()])  # number params
-        m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
-        logger.info('%3s%18s%3s%10.0f  %-40s%-30s' % (i, f, n, np, t, args))  # print
-        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
-        layers.append(m_)
-        if i == 0:
-            ch = []
-        ch.append(c2)
-    return nn.Sequential(*layers), sorted(save)
+    if len(model) == 1:
+        return model[-1]  # return model
+    else:
+        print(f'Ensemble created with {weights}\n')
+        for k in ['names']:
+            setattr(model, k, getattr(model[-1], k))
+        model.stride = model[torch.argmax(torch.tensor([m.stride.max() for m in model])).int()].stride  # max stride
+        return model  # return ensemble
 
 
 if __name__ == '__main__':
@@ -290,7 +249,10 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    print(model)
+    # print(model)
+    sample = torch.rand(2, 3, 640, 640).to(device)
+    res = model(sample)
+    # print(res)
     model.train()
 
     # Profile

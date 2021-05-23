@@ -423,7 +423,7 @@ def clip_coords(boxes, img_shape):
 
 
 def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
-    # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
+    # Returns the IoU of box1 to box2. box1 is 4xn, box2 is nx4, no broadcast, box1 and box2 are already matched one to one
     box2 = box2.T
 
     # Get the coordinates of bounding boxes
@@ -491,6 +491,28 @@ def box_iou(box1, box2):
     inter = (torch.min(box1[:, None, 2:], box2[:, 2:]) - torch.max(box1[:, None, :2], box2[:, :2])).clamp(0).prod(2)
     return inter / (area1[:, None] + area2 - inter)  # iou = inter / (area1 + area2 - inter)
 
+def pairwise_iou(box1, box2, x1y1x2y2=True):
+    # box1 nx4, box2 mx4, return a (n,m) matrix
+    if not x1y1x2y2:
+        box1 = xywh2xyxy(box1)
+        box2 = xywh2xyxy(box2)
+
+    area = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    iw = torch.min(torch.unsqueeze(box1[:, 2], dim=1), box2[:, 2]) - torch.max(torch.unsqueeze(box1[:, 0], 1), box2[:, 0])
+    ih = torch.min(torch.unsqueeze(box1[:, 3], dim=1), box2[:, 3]) - torch.max(torch.unsqueeze(box1[:, 1], 1), box2[:, 1])
+
+    iw = torch.clamp(iw, min=0)
+    ih = torch.clamp(ih, min=0)
+
+    ua = torch.unsqueeze((box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1]), dim=1) + area - iw * ih
+
+    ua = torch.clamp(ua, min=1e-8)
+
+    intersection = iw * ih
+
+    IoU = intersection / ua
+
+    return IoU
 
 def wh_iou(wh1, wh2):
     # Returns the nxm IoU matrix. wh1 is nx2, wh2 is mx2
@@ -501,15 +523,20 @@ def wh_iou(wh1, wh2):
 
 
 def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
-                        labels=()):
+                        labels=(), objectness=True):
     """Runs Non-Maximum Suppression (NMS) on inference results
 
     Returns:
          list of detections, on (n,6) tensor per image [xyxy, conf, cls]
     """
-
+    if not objectness:
+        # add fake objectness to prediction
+        prediction = torch.cat([prediction[:,:,:4], torch.ones(prediction.shape[0],prediction.shape[1], 1).to(prediction.device), prediction[:,:,4:]], dim=2)
     nc = prediction.shape[2] - 5  # number of classes
-    xc = prediction[..., 4] > conf_thres  # candidates
+    if objectness:
+        xc = prediction[..., 4] > conf_thres  # candidates
+    else:
+        xc = prediction[..., 5:].max(dim=2)[0] > conf_thres
 
     # Checks
     assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'

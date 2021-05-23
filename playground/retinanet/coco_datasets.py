@@ -77,7 +77,7 @@ def create_dataloader(json_path, img_path, imgsz, batch_size, stride, opt, hyp=N
                         num_workers=nw,
                         sampler=sampler,
                         pin_memory=True,
-                        collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+                        collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn_retinanet)
     return dataloader, dataset
 
 
@@ -423,7 +423,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             labels_out[:, 1:] = torch.from_numpy(labels)
 
         # Convert
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        # img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img = img.transpose(2, 0, 1)
         img = np.ascontiguousarray(img)
 
         return torch.from_numpy(img), labels_out, self.img_files[index], shapes
@@ -438,13 +439,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     @staticmethod
     def collate_fn_retinanet(batch):
         img, label, path, shapes = zip(*batch)  # transposed
-        new_labels = []
         for i, l in enumerate(label):
-            new_label = l[:,1:]
-            new_label[:, [1, 3]] *= img[i].shape[1]
-            new_label[:, [2, 4]] *= img[i].shape[0]
-            new_labels.append(new_label)
-        return torch.stack(img, 0), new_labels, path, shapes
+            l[:, 0] = i  # add target image index for build_targets()
+            l[:, [2, 4]] *= img[i].shape[2] # w
+            l[:, [3, 5]] *= img[i].shape[1] # h
+        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
 
     @staticmethod
     def collate_fn4(batch):

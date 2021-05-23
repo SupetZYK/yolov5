@@ -9,8 +9,7 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from models.experimental import attempt_load
-# from utils.datasets import create_dataloader
+from model import attempt_load
 from utils.coco_datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
@@ -42,8 +41,8 @@ def test(data,
          is_coco=False,
          opt=None):
     # Initialize/load model and set device
-    training = model is not None
     json_file, img_path = data[task]
+    training = model is not None
     if training:  # called by train.py
         device = next(model.parameters()).device  # get model device
 

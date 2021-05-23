@@ -12,6 +12,7 @@ download: bash data/scripts/get_coco.sh
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
 # train: ../coco/train2017.txt  # 118287 images
 train: [/data/dataset/coco/annotations/instances_train2017.json, /data/dataset/coco/train2017]
+# train: [/data/dataset/coco/annotations/instances_val2017.json, /data/dataset/coco/val2017]
 # val: ../coco/val2017.txt  # 5000 images
 val: [/data/dataset/coco/annotations/instances_val2017.json, /data/dataset/coco/val2017]
 # test: ../coco/test-dev2017.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
