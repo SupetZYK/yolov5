@@ -53,6 +53,7 @@ class Detect(nn.Module):
         # x = x.copy()  # for profiling
         z = []  # inference output
         xs = [] # raw output
+        # import ipdb;ipdb.set_trace()
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,84)
@@ -61,18 +62,19 @@ class Detect(nn.Module):
             if self.grid[i].shape[2:4] != x[i].shape[2:4] or self.onnx_dynamic:
                 self.grid[i] = self._make_grid(nx, ny).to(self.anchor_grid.device) # (1,1,20,20,2)
                 # refresh anchors
-                self.all_anchors[i] = torch.cat([(self.grid[i].repeat(1,self.na,1,1,1) + 0.5) * self.stride[i], self.anchor_grid[i].repeat(1,1,ny,nx,1)], dim=4) # (1,na,nx,ny,4)
-                self.all_anchors[i] = self.all_anchors[i].view(-1, 4)
-            y = x[i].sigmoid() #(bs,na,nx,ny,84)
+                self.all_anchors[i] = torch.cat([(self.grid[i].repeat(1,self.na,1,1,1) + 0.5) * self.stride[i], self.anchor_grid[i].repeat(1,1,ny,nx,1)], dim=4) # (1,na,ny,nx,4)
+                self.all_anchors[i] = self.all_anchors[i].view(1, -1, 4)
+            y = x[i].clone().view(bs, -1, self.no)
+            y[...,4:] = y[...,4:].sigmoid()
+            # y = y.sigmoid()
             if self.inplace:
-                y[..., 0:2] = y[..., 0:2] * self.anchor_grid[i] + self.grid[i].to(self.anchor_grid.device)
-                y[..., 2:4] = torch.exp(y[..., 2:4]) * self.anchor_grid[i]
-            else:  # for YOLOv5 on AWS Inferentia https://github.com/ultralytics/yolov5/pull/2953
-                xy = y[..., 0:2] * self.anchor_grid[i] + self.grid[i]
-                wh = torch.exp(y[..., 2:4]) * self.anchor_grid[i]
-                y = torch.cat((xy, wh, y[..., 4:]), -1) # (bs,na,nx,ny,84)
-            z.append(y.view(bs, -1, self.no))
-
+                y[..., 0:2] = y[..., 0:2] * self.all_anchors[i][..., 2:] + self.all_anchors[i][..., :2]
+                y[..., 2:4] = torch.exp(y[..., 2:4]) * self.all_anchors[i][..., 2:]
+            else:
+                xy = y[..., 0:2] * self.all_anchors[i][..., 2:] + self.all_anchors[i][..., :2]
+                wh = y[..., 2:4].exp() * self.all_anchors[i][..., 2:]
+                y = torch.cat([xy, wh, y[..., 4:]], -1)
+            z.append(y)
         return (torch.cat(z, 1), torch.cat(xs, 1)) if self.training else (torch.cat(z, 1), torch.cat(xs, 1))
     
     # def get_anchors(self, img_h, img_w, ):
@@ -89,12 +91,12 @@ class Detect(nn.Module):
         Args:
             all_anchors (list[tensor]): List[layer_anchors],layer_anchors shape (-1,4), xywh
             nn_raw_out (tensor): nn output, (bs, N_a, 84), no sigmoid applied
-            targets (tensor): list[label] label shape (-1, 5), xywh
+            targets (tensor): list[label] label shape (-1, 6), [img_id,cls_id,x,y,w,h]
         """
         alpha = 0.25
         gamma = 2.0
         num_images = nn_raw_out.shape[0]
-        anchors = torch.cat(all_anchors, dim=0)
+        anchors = torch.cat(all_anchors, dim=1).view(-1, 4)
 
         regressions = nn_raw_out[..., 0:4]
         classifications = nn_raw_out[...,4:]
@@ -241,8 +243,9 @@ class Model(nn.Module):
         for layer in self.detect.modules():
             if isinstance(layer, nn.Conv2d):
                 torch.nn.init.normal_(layer.weight, mean=0, std=0.01)
-                torch.nn.init.constant_(layer.bias, -math.log((1.0 - 0.01) / 0.01))
+                torch.nn.init.constant_(layer.bias, 0)
         
+        self._initialize_biases()
         initialize_weights(self)
         self.info()
         logger.info('')
@@ -295,7 +298,8 @@ class Model(nn.Module):
         for mi, s in zip(m.m, m.stride):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             # b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
-            b.data[:, 4:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+            # b.data[:, 4:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+            b.data[:, 4:] = - math.log((1-0.01) / (0.01))
             mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
     def _print_biases(self):
@@ -352,7 +356,7 @@ def attempt_load(weights, map_location=None, inplace=True):
     for w in weights if isinstance(weights, list) else [weights]:
         # attempt_download(w)
         ckpt = torch.load(w, map_location=map_location)  # load
-        model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().fuse().eval())  # FP32 model
+        model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().eval())  # FP32 model
 
     # Compatibility updates
     for m in model.modules():
@@ -382,7 +386,7 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    # print(model)
+
     sample = torch.rand(4, 3, 640, 640).to(device)
     cls_id = torch.randint(0, 80,(8,1))
     xy = torch.randint(0, 400, (8, 2))
@@ -400,7 +404,7 @@ if __name__ == '__main__':
     infer_out, nn_out = model(sample)
     print('infer out: ', infer_out.shape)
     print('nn_out: ', nn_out.shape)
-    print('anchors', torch.cat(model.detect.all_anchors, dim=0).shape)
+    print('anchors', torch.cat(model.detect.all_anchors, dim=1).shape)
     losses = model.detect.loss(model.detect.all_anchors, nn_out, labels)
     print(losses)
     # Profile

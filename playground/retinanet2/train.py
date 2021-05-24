@@ -92,7 +92,8 @@ def train(hyp, opt, device, tb_writer=None):
         model.load_state_dict(state_dict, strict=False)  # load
         logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
-        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        model = Model(opt.cfg, nc=nc).to(device)  # create
+
     # with torch_distributed_zero_first(rank):
     #     check_dataset(data_dict)  # check
     train_json_path, train_img_path = data_dict['train']
@@ -175,7 +176,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Image sizes
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.detect.nl  # number of detection layers (used for scaling hyp['obj'])
+    # nl = model.detect.nl  # number of detection layers (used for scaling hyp['obj'])
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
     # DP mode
@@ -225,10 +226,7 @@ def train(hyp, opt, device, tb_writer=None):
                     # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
                     find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
 
-    # Model parameters # TODO why?
-    hyp['box'] *= 3. / nl  # scale to layersq
-    hyp['cls'] *= nc / 80. * 3. / nl  # scale to classes and layers
-    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / nl  # scale to image size and layers
+    # Model parameters 
     hyp['label_smoothing'] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
@@ -305,9 +303,10 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred, nn_out = model(imgs)  # forward
-                anchors = [a.to(pred.device) for a in model.module.detect.all_anchors]
-                losses = model.module.detect.loss(anchors, nn_out, targets.to(device))
+                pred, cls_preds, loc_preds = model(imgs)  # forward
+                # anchors = [a.to(pred.device) for a in model.module.anchors]
+                anchors = model.module.anchors
+                losses = model.module.loss(cls_preds, loc_preds, anchors, targets.to(device))
                 losses.update(
                     loss=sum(losses.values())
                 )
@@ -441,7 +440,7 @@ def train(hyp, opt, device, tb_writer=None):
             if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
-                        # 'training_results': results_file.read_text(),
+                        'training_results': results_file.read_text(),
                         'model': deepcopy(model.module if is_parallel(model) else model).half(),
                         'ema': deepcopy(ema.ema).half(),
                         'updates': ema.updates,

@@ -1,0 +1,11 @@
+# parameters
+nc: 80  # number of classes
+depth: 50 # backbone depth
+fpn_feat_size: 256 # feat size for each fpn feature
+pretrained: True
+
+# anchors
+anchors:
+  - [10,13, 16,30, 33,23]  # P3/8
+  - [30,61, 62,45, 59,119]  # P4/16
+  - [116,90, 156,198, 373,326]  # P5/32
