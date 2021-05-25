@@ -10,6 +10,7 @@ import yaml
 from tqdm import tqdm
 
 from model import attempt_load
+# from utils.coco_datasets import create_dataloader
 from coco_datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
@@ -112,7 +113,7 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            out, _, _ = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # # Compute loss
@@ -121,7 +122,7 @@ def test(data,
 
             # Run NMS
             # targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
-            targets = targets.to(device)
+            # targets = targets.to(device)
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
             out = non_max_suppression(out, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, objectness=False)
@@ -221,7 +222,8 @@ def test(data,
             Thread(target=plot_images, args=(img, targets, paths, f, names), daemon=True).start()
             f = save_dir / f'test_batch{batch_i}_pred.jpg'  # predictions
             Thread(target=plot_images, args=(img, output_to_target(out), paths, f, names), daemon=True).start()
-
+        
+        # del img, out, targets
         torch.cuda.empty_cache()
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy

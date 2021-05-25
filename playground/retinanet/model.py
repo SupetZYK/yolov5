@@ -13,7 +13,7 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from models.common import autoShape
-from resnet_fpn import ResnetFPN
+from resnet_fpn import ResnetFPN, Bottleneck, BasicBlock,PyramidFeatures
 from utils.loss import smooth_l1_loss
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging, pairwise_iou
@@ -56,6 +56,7 @@ class Detect(nn.Module):
         # import ipdb;ipdb.set_trace()
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
+            import ipdb;ipdb.set_trace()
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,84)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous() #(bs,3,20,20,84)
             xs.append(x[i].view(x[i].shape[0], -1, self.no))
@@ -247,8 +248,8 @@ class Model(nn.Module):
         
         self._initialize_biases()
         initialize_weights(self)
-        self.info()
-        logger.info('')
+        # self.info()
+        # logger.info('')
 
 
     def forward(self, x, augment=False, profile=False):
@@ -386,7 +387,6 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-
     sample = torch.rand(4, 3, 640, 640).to(device)
     cls_id = torch.randint(0, 80,(8,1))
     xy = torch.randint(0, 400, (8, 2))

@@ -131,12 +131,12 @@ class PyramidFeatures(nn.Module):
         self.P3_1 = nn.Conv2d(C3_size, feature_size, kernel_size=1, stride=1, padding=0)
         self.P3_2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=1, padding=1)
 
-        # # "P6 is obtained via a 3x3 stride-2 conv on C5"
-        # self.P6 = nn.Conv2d(C5_size, feature_size, kernel_size=3, stride=2, padding=1)
+        # "P6 is obtained via a 3x3 stride-2 conv on C5"
+        self.P6 = nn.Conv2d(C5_size, feature_size, kernel_size=3, stride=2, padding=1)
 
-        # # "P7 is computed by applying ReLU followed by a 3x3 stride-2 conv on P6"
-        # self.P7_1 = nn.ReLU()
-        # self.P7_2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
+        # "P7 is computed by applying ReLU followed by a 3x3 stride-2 conv on P6"
+        self.P7_1 = nn.ReLU()
+        self.P7_2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
 
     def forward(self, inputs):
         C3, C4, C5 = inputs
@@ -154,13 +154,13 @@ class PyramidFeatures(nn.Module):
         P3_x = P3_x + P4_upsampled_x
         P3_x = self.P3_2(P3_x)
 
-        # P6_x = self.P6(C5)
+        P6_x = self.P6(C5)
 
-        # P7_x = self.P7_1(P6_x)
-        # P7_x = self.P7_2(P7_x)
+        P7_x = self.P7_1(P6_x)
+        P7_x = self.P7_2(P7_x)
 
-        # return [P3_x, P4_x, P5_x, P6_x, P7_x]
-        return [P3_x, P4_x, P5_x]
+        return [P3_x, P4_x, P5_x, P6_x, P7_x]
+        # return [P3_x, P4_x, P5_x]
 
 
 
