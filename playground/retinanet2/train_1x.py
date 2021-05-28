@@ -23,9 +23,10 @@ from tqdm import tqdm
 
 import test  # import test.py to get mAP after each epoch
 from model import attempt_load, Model
-from utils.autoanchor import check_anchors
+# from utils.autoanchor import check_anchors
 # from utils.datasets import create_dataloader
-from coco_datasets import create_dataloader
+# from coco_datasets import create_dataloader
+from coco_min_max_datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
@@ -108,31 +109,31 @@ def train(hyp, opt, device, tb_writer=None):
             v.requires_grad = False
 
     # Optimizer
-    nbs = 64  # nominal batch size
+    nbs = 16  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
-    pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
-    for k, v in model.named_modules():
-        if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
-            pg2.append(v.bias)  # biases
-        if isinstance(v, nn.BatchNorm2d):
-            pg0.append(v.weight)  # no decay
-        elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
-            pg1.append(v.weight)  # apply decay
+    # pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
+    # for k, v in model.named_modules():
+    #     if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
+    #         pg2.append(v.bias)  # biases
+    #     if isinstance(v, nn.BatchNorm2d):
+    #         pg0.append(v.weight)  # no decay
+    #     elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
+    #         pg1.append(v.weight)  # apply decay
 
     if opt.adam:
         logger.info('Adam')
-        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
+        optimizer = optim.Adam(model.parameters(), lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
         logger.info('SGD')
-        optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
+        optimizer = optim.SGD(model.parameters(), lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
-    optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
-    optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
-    logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
-    del pg0, pg1, pg2
+    # optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
+    # optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
+    # logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
+    # del pg0, pg1, pg2
 
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
@@ -177,7 +178,7 @@ def train(hyp, opt, device, tb_writer=None):
     # Image sizes
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
     # nl = model.detect.nl  # number of detection layers (used for scaling hyp['obj'])
-    # imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
+    # imgsz = [check_img_size(x, 32) for x in opt.img_size]  # verify imgsz are gs-multiples
     imgsz = opt.img_size
 
     # DP mode
@@ -219,7 +220,8 @@ def train(hyp, opt, device, tb_writer=None):
             # Anchors
             # if not opt.noautoanchor:
             #     check_anchors(dataset, model=model.detect, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # pre-reduce anchor precision
+
+            # model.half().float()  # pre-reduce anchor precision
 
     # DDP mode
     if cuda and rank != -1:
@@ -237,14 +239,14 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    # nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
-    nw = 0
+    nw = max(round(hyp['warmup_epochs'] * nb), 200)  # number of warmup iterations, max(3 epochs, 1k iterations)
+    # nw = 0
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
-    logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
+    logger.info(f'Image sizes {imgsz} train, {imgsz} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
@@ -269,7 +271,7 @@ def train(hyp, opt, device, tb_writer=None):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
+        mloss = torch.zeros(3)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
@@ -294,63 +296,63 @@ def train(hyp, opt, device, tb_writer=None):
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
 
-            # Multi-scale
-            if opt.multi_scale:
-                sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                sf = sz / max(imgs.shape[2:])  # scale factor
-                if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
-
-            # Forward
-            with amp.autocast(enabled=cuda):
-                pred, cls_preds, loc_preds = model(imgs)  # forward
-                # anchors = [a.to(pred.device) for a in model.module.anchors]
-                anchors = model.module.anchors
-                losses = model.module.loss(cls_preds, loc_preds, anchors, targets.to(device))
-                losses.update(
-                    loss=sum(losses.values())
-                )
-                # import ipdb;ipdb.set_trace()
-                # loss = losses['loss'] * batch_size # loss scaled by batch_size
-                loss = losses['loss']
-                assert torch.isfinite(loss), 'loss is inf or nan'
-                loss_items = torch.stack([losses['cls_loss'], losses['reg_loss'], losses['loss']]).detach()
-                if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
-
-            # Backward
-            scaler.scale(loss).backward()
-
-            # Optimize
-            if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
-                if ema:
-                    ema.update(model)
+            # # Multi-scale
+            # if opt.multi_scale:
+            #     sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+            #     sf = sz / max(imgs.shape[2:])  # scale factor
+            #     if sf != 1:
+            #         ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+            #         imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # # Forward
-            # pred, nn_out = model(imgs)  # forward
-            # anchors = [a.to(pred.device) for a in model.module.detect.all_anchors]
-            # losses = model.module.detect.loss(anchors, nn_out, targets.to(device))
-            # losses.update(
-            #     loss=sum(losses.values())
-            # )
-            # # import ipdb;ipdb.set_trace()
-            # # loss = losses['loss'] * batch_size # loss scaled by batch_size
-            # loss = losses['loss']
-            # loss_items = torch.stack([losses['cls_loss'], losses['reg_loss'], losses['loss']]).detach()
-            # # if rank != -1:
-            # #     loss *= opt.world_size  # gradient averaged between devices in DDP mode
+            # with amp.autocast(enabled=cuda):
+            #     pred, cls_preds, loc_preds, centerness = model(imgs)  # forward
+            #     # anchors = [a.to(pred.device) for a in model.module.anchors]
+            #     losses = model.module.loss(cls_preds, loc_preds, centerness, targets.to(device))
+            #     losses.update(
+            #         loss=losses['cls_loss'] + losses['reg_loss'] + losses['center_loss']
+            #     )
+            #     # import ipdb;ipdb.set_trace()
+            #     # loss = losses['loss'] * batch_size # loss scaled by batch_size
+            #     loss = losses['loss']
+            #     assert torch.isfinite(loss), f'loss is inf or nan cls_loss: {losses["cls_loss"]}, reg_loss: {losses["reg_loss"]}'
+            #     loss_items = torch.stack([losses['cls_loss'], losses['reg_loss'], losses['center_loss'], losses['loss']]).detach()
+            #     if rank != -1:
+            #         loss *= opt.world_size  # gradient averaged between devices in DDP mode
+            #     if opt.quad:
+            #         loss *= 4.
+
+            # # Backward
+            # scaler.scale(loss).backward()
+
+            # # Optimize
+            # if ni % accumulate == 0:
+            #     scaler.step(optimizer)  # optimizer.step
+            #     scaler.update()
+            #     optimizer.zero_grad()
+            #     if ema:
+            #         ema.update(model)
+
+            # Forward
+            pred, cls_preds, loc_preds = model(imgs)  # forward
+            anchors = model.module.anchors
+            losses = model.module.loss(cls_preds, loc_preds, anchors, targets.to(device))
+            losses.update(
+                loss=sum(losses.values())
+            )
+            loss = losses['loss']
+            assert torch.isfinite(loss), f'loss is inf or nan cls_loss: {losses["cls_loss"]}, reg_loss: {losses["reg_loss"]}'
+            loss_items = torch.Tensor([losses['cls_loss'].item(), losses['reg_loss'].item(), losses['loss'].item()])
+            # if rank != -1:
+            #     loss *= opt.world_size  # gradient averaged between devices in DDP mode
             # if opt.quad:
             #     loss *= 4.
 
-            # # Backward
-            # # scaler.scale(loss).backward()
-            # loss.backward()
+            # Backward
+            # scaler.scale(loss).backward()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
             
             # # Optimize
             # if ni % accumulate == 0:
@@ -380,10 +382,10 @@ def train(hyp, opt, device, tb_writer=None):
 
             # tb
             if i % 10 == 0:
-                tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss', # train loss
-                        'x/lr0', 'x/lr1', 'x/lr2' # params
+                tags = ['train/cls_loss', 'train/reg_loss', 'train/total_loss', # train loss
+                        'lr' # params
                     ]
-                lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
+                lr = [optimizer.param_groups[0]['lr']]  # for tensorboard
                 for x, tag in zip(list(mloss[:-1]) + lr, tags):
                     if tb_writer:
                         tb_writer.add_scalar(tag, x, epoch * nb + i)  # tensorboard
@@ -404,7 +406,7 @@ def train(hyp, opt, device, tb_writer=None):
                 results, maps, times = test.test(data_dict,
                                                 # conf_thres=0.1,
                                                 batch_size=batch_size,
-                                                imgsz=imgsz_test,
+                                                imgsz=imgsz,
                                                 model=ema.ema,
                                                 single_cls=opt.single_cls,
                                                 dataloader=testloader,
@@ -477,7 +479,7 @@ def train(hyp, opt, device, tb_writer=None):
             for m in (last, best) if best.exists() else (last):  # speed, mAP tests
                 results, _, _ = test.test(opt.data,
                                           batch_size=batch_size * 2,
-                                          imgsz=imgsz_test,
+                                          imgsz=imgsz,
                                           conf_thres=0.001,
                                           iou_thres=0.7,
                                           model=attempt_load(m, device).half(),
@@ -514,7 +516,7 @@ if __name__ == '__main__':
     parser.add_argument('--hyp', type=str, default='data/hyp.scratch.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
-    parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
+    parser.add_argument('--img-size', nargs='+', type=int, default=[640, 896], help='image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
@@ -548,9 +550,9 @@ if __name__ == '__main__':
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
     set_logging(opt.global_rank)
-    if opt.global_rank in [-1, 0]:
-        # check_git_status()
-        check_requirements(exclude=('pycocotools', 'thop'))
+    # if opt.global_rank in [-1, 0]:
+    #     # check_git_status()
+    #     check_requirements(exclude=('pycocotools', 'thop'))
 
     # Resume
     # wandb_run = check_wandb_resume(opt)

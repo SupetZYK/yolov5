@@ -56,7 +56,6 @@ class Detect(nn.Module):
         # import ipdb;ipdb.set_trace()
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
-            import ipdb;ipdb.set_trace()
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,84)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous() #(bs,3,20,20,84)
             xs.append(x[i].view(x[i].shape[0], -1, self.no))

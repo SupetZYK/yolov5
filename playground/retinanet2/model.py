@@ -239,7 +239,7 @@ class PyramidFeatures(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, cfg='retinanet.yaml', nc=None):
+    def __init__(self, cfg='retinanet.yaml', nc=None, anchors=None):
         """
         NOTE: this interface is experimental.
         """
@@ -258,9 +258,9 @@ class Model(nn.Module):
         fpn_fs = self.yaml.get('fpn_feat_size', 256)
         depth = self.yaml.get('depth', 50)
         pretrained = self.yaml.get('pretrain', True)
-        # if anchors:
-        #     logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
-        #     self.yaml['anchors'] = round(anchors)  # override yaml value
+        if anchors:
+            logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
+            self.yaml['anchors'] = round(anchors)  # override yaml value
 
         super(Model, self).__init__()
         if depth == 18:

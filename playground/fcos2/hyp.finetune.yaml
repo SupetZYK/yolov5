@@ -9,7 +9,7 @@
 # Metrics:        0.6     0.936     0.896     0.684    0.0115   0.00805   0.00146
 
 lr0: 0.01
-lrf: 0.01
+lrf: 0.12
 momentum: 0.9
 weight_decay: 0.0001
 warmup_epochs: 0

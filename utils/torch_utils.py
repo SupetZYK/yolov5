@@ -16,6 +16,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+import torch.distributed as dist
 
 try:
     import thop  # for FLOPS computation
@@ -23,6 +24,26 @@ except ImportError:
     thop = None
 logger = logging.getLogger(__name__)
 
+def get_world_size() -> int:
+    if not dist.is_available():
+        return 1
+    if not dist.is_initialized():
+        return 1
+    return dist.get_world_size()
+
+def reduce_sum(tensor):
+    world_size = get_world_size()
+    if world_size < 2:
+        return tensor
+    tensor = tensor.clone()
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor
+
+
+def reduce_mean(tensor):
+    num_gpus = get_world_size()
+    total = reduce_sum(tensor)
+    return total.float() / num_gpus
 
 @contextmanager
 def torch_distributed_zero_first(local_rank: int):

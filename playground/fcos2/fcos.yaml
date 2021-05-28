@@ -1,0 +1,15 @@
+# parameters
+nc: 80  # number of classes
+depth: 50 # backbone depth
+fpn_feat_size: 256 # feat size for each fpn feature
+pretrained: True
+
+# FCOS related
+object_sizes_of_interest:
+  - [-1, 64] # P3/8
+  - [64, 128] # P4/16
+  - [128, 256] # P5/32
+  - [256, 512] # P6/64
+  - [512, 9999999] # P7/128
+
+center_sampling_radius: -1

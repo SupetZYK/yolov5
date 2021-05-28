@@ -34,10 +34,7 @@ def detect(opt):
     model = attempt_load(weights, map_location=device)  # load FP32 model
     stride = int(model.stride.max())  # model stride
     imgsz = check_img_size(imgsz, s=stride)  # check img_size
-    try:
-        names = model.module.names if hasattr(model, 'module') else model.names  # get class names
-    except:
-        names = [str(i) for i in range(80)]  # default names
+    names = model.module.names if hasattr(model, 'module') else model.names  # get class names
     if half:
         model.half()  # to FP16
 
@@ -56,9 +53,9 @@ def detect(opt):
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
-    # # Run inference
-    # if device.type != 'cpu':
-    #     model(torch.zeros(1, 3, 256, 256).to(device).type_as(next(model.parameters())))  # run once
+    # Run inference
+    if device.type != 'cpu':
+        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
     t0 = time.time()
     for path, img, im0s, vid_cap in dataset:
         img = torch.from_numpy(img).to(device)
@@ -73,8 +70,8 @@ def detect(opt):
         # Inference
         t1 = time_synchronized()
         # pred = model(img, augment=opt.augment)[0]
-        pred, cls_preds, loc_preds, centerness = model(img)
-        # import ipdb;ipdb.set_trace()
+        # pred, _, _, _ = model(img)
+        pred = model(img)
         # Apply NMS
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms, objectness=False)
         t2 = time_synchronized()
@@ -158,7 +155,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='data/images', help='source')  # file/folder, 0 for webcam
-    parser.add_argument('--img-size', type=int, default=640, help='image sizes')
+    parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')

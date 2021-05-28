@@ -68,7 +68,9 @@ def create_dataloader(json_path, img_path, imgsz, batch_size, stride, opt, hyp=N
                                       prefix=prefix)
 
     batch_size = min(batch_size, len(dataset))
-    nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
+    # nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
+    # print('worker: ', nw)
+    nw = 4
     sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
     loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
     # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
@@ -142,6 +144,7 @@ def load_coco_json(json_file, image_root, extra_annotation_keys=None):
     from pycocotools.coco import COCO
     import contextlib
     import io
+    import pickle
     # timer = Timer()
     # json_file = PathManager.get_local_path(json_file)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -275,15 +278,16 @@ def load_coco_json(json_file, image_root, extra_annotation_keys=None):
 
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
-    def __init__(self, json_path, img_path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+    def __init__(self, json_path, img_path, img_size=(800, 1333), batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
         self.image_weights = image_weights
         self.rect = False if image_weights else rect
-        self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
-        self.mosaic_border = [-img_size // 2, -img_size // 2]
+        # NOTE mosaic in this mode is not implemented
+        # self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
+        # self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.json_path = json_path
         self.img_path = img_path
@@ -304,6 +308,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 x[:, 0] = 0
 
         n = len(shapes)  # number of images
+        print('shape shape', self.shapes.shape)
+        print('shape len', n)
         bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
@@ -312,6 +318,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Rectangular Training
         if self.rect:
+            print('rect')
             # Sort by aspect ratio
             s = self.shapes  # wh
             ar = s[:, 1] / s[:, 0]  # aspect ratio
@@ -321,17 +328,17 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             self.shapes = s[irect]  # wh
             ar = ar[irect]
 
-            # Set training image shapes
-            shapes = [[1, 1]] * nb
-            for i in range(nb):
-                ari = ar[bi == i]
-                mini, maxi = ari.min(), ari.max()
-                if maxi < 1:
-                    shapes[i] = [maxi, 1]
-                elif mini > 1:
-                    shapes[i] = [1, 1 / mini]
+            # # Set training image shapes
+            # shapes = [[1, 1]] * nb
+            # for i in range(nb):
+            #     ari = ar[bi == i]
+            #     mini, maxi = ari.min(), ari.max()
+            #     if maxi < 1:
+            #         shapes[i] = [maxi, 1]
+            #     elif mini > 1:
+            #         shapes[i] = [1, 1 / mini]
 
-            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+            # self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
@@ -360,40 +367,29 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         index = self.indices[index]  # linear, shuffled, or image_weights
 
         hyp = self.hyp
-        mosaic = self.mosaic and random.random() < hyp['mosaic']
-        if mosaic:
-            # Load mosaic
-            img, labels = load_mosaic(self, index)
-            shapes = None
+        # Load image
+        img, (h0, w0), (h, w) = load_image(self, index)
+        # pad to mod 128
+        pad_2w, pad_2h = 32-w%32, 32-h%32
+        pad = (pad_2w // 2, pad_2h // 2)
+        image_paded = np.zeros(shape=[h+pad_2h, w+pad_2w, 3],dtype=np.uint8)
+        image_paded[pad[1]:pad[1]+h, pad[0]:pad[0]+w, :] = img
+        img = image_paded
+        shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            # MixUp https://arxiv.org/pdf/1710.09412.pdf
-            if random.random() < hyp['mixup']:
-                img2, labels2 = load_mosaic(self, random.randint(0, self.n - 1))
-                r = np.random.beta(8.0, 8.0)  # mixup ratio, alpha=beta=8.0
-                img = (img * r + img2 * (1 - r)).astype(np.uint8)
-                labels = np.concatenate((labels, labels2), 0)
-
-        else:
-            # Load image
-            img, (h0, w0), (h, w) = load_image(self, index)
-            # Letterbox
-            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
-            img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
-            shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
-
-            labels = self.labels[index].copy()
-            if labels.size:  # normalized xywh to pixel xyxy format
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+        labels = self.labels[index].copy()
+        if labels.size:  # normalized xywh to pixel xyxy format
+            labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw=pad[0], padh=pad[1])
 
         if self.augment:
             # Augment imagespace
-            if not mosaic:
-                img, labels = random_perspective(img, labels,
-                                                 degrees=hyp['degrees'],
-                                                 translate=hyp['translate'],
-                                                 scale=hyp['scale'],
-                                                 shear=hyp['shear'],
-                                                 perspective=hyp['perspective'])
+            # # if not mosaic:
+            # img, labels = random_perspective(img, labels,
+            #                                     degrees=hyp['degrees'],
+            #                                     translate=hyp['translate'],
+            #                                     scale=hyp['scale'],
+            #                                     shear=hyp['shear'],
+            #                                     perspective=hyp['perspective'])
 
             # Augment colorspace
             augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
@@ -442,11 +438,25 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     @staticmethod
     def collate_fn_retinanet(batch):
         img, label, path, shapes = zip(*batch)  # transposed
+        # get max w, h for pad
+        max_w = max([img_.shape[2] for img_ in img])
+        max_h = max([img_.shape[1] for img_ in img])
+
+        imgs = torch.ones([len(img), 3, max_h, max_w])
+        new_shapes = []
         for i, l in enumerate(label):
+            h, w = img[i].shape[1:]
+            pad_h, pad_w = (max_h - h) // 2, (max_w - w) // 2
+            new_shapes.append((shapes[i][0], (shapes[i][1][0], (pad_h, pad_w))))
+            # pad label
             l[:, 0] = i  # add target image index for build_targets()
-            l[:, [2, 4]] *= img[i].shape[2] # xw
-            l[:, [3, 5]] *= img[i].shape[1] # yh
-        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
+            l[:, [2, 4]] *= img[i].shape[2] # x, w 
+            l[:, [3, 5]] *= img[i].shape[1] # y, h
+            l[:, 2] += pad_w
+            l[:, 3] += pad_h
+            # pad img
+            imgs[i,:, pad_h:pad_h+h, pad_w:pad_w+w] = img[i]
+        return imgs, torch.cat(label, 0), path, new_shapes
 
     @staticmethod
     def collate_fn4(batch):
@@ -484,7 +494,13 @@ def load_image(self, index):
         img = cv2.imread(path)  # BGR
         assert img is not None, 'Image Not Found ' + path
         h0, w0 = img.shape[:2]  # orig hw
-        r = self.img_size / max(h0, w0)  # ratio
+        # r = self.img_size / max(h0, w0)  # ratio
+        min_side, max_side = self.img_size
+        smallest_side = min(w0,h0)
+        largest_side = max(w0,h0)
+        r=min_side/smallest_side
+        if largest_side*r>max_side:
+            r=max_side/largest_side
         if r != 1:  # if sizes are not equal
             img = cv2.resize(img, (int(w0 * r), int(h0 * r)),
                              interpolation=cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR)
@@ -930,8 +946,9 @@ if __name__ == "__main__":
         json_path='/data/dataset/coco/annotations/instances_val2017.json',
         img_path='/data/dataset/coco/val2017',
         augment=True,
-        rect=True,
+        rect=False,
         hyp=hyp,
+        img_size=1024
     )
 
     # get one example

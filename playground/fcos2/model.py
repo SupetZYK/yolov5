@@ -18,9 +18,10 @@ import math
 from utils.loss import smooth_l1_loss
 from utils.general import make_divisible, check_file, set_logging, xyxy2xywh
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
-    select_device, copy_attr, reduce_mean
+    select_device, copy_attr
 
-
+from adet.utils.comm import compute_locations
+from fcos_outputs import FCOSOutputs
 
 class RegressionModel(nn.Module):
     def __init__(self, num_features_in):
@@ -53,9 +54,11 @@ class RegressionModel(nn.Module):
 
         out = self.output(out)
 
-        # out is B x C x W x H, with C = 4*num_anchors
-        out = out.permute(0, 2, 3, 1) # bs h w c
-        return out.contiguous().view(out.shape[0], -1, 4)
+        return out
+
+        # # out is B x C x W x H, with C = 4*num_anchors
+        # out = out.permute(0, 2, 3, 1) # bs h w c
+        # return out.contiguous().view(out.shape[0], -1, 4)
 
 
 class ClassificationModel(nn.Module):
@@ -91,10 +94,14 @@ class ClassificationModel(nn.Module):
 
         out = self.output(feat)
 
-        out = out.permute(0, 2, 3, 1) # B H W C
-        out = out.view(x.shape[0], -1, self.nc).contiguous()
         centerness = self.centerness(feat) # B 1 H W
-        return out, centerness.view(x.shape[0], -1, 1)
+
+        return out, centerness
+
+        # out = out.permute(0, 2, 3, 1) # B H W C
+        # out = out.view(x.shape[0], -1, self.nc).contiguous()
+        # centerness = self.centerness(feat) # B 1 H W
+        # return out, centerness.view(x.shape[0], -1, 1)
         # return out, torch.ones(x.shape[0], out.shape[1], 1).to(out.device)
 
 class Scale(nn.Module):
@@ -102,8 +109,8 @@ class Scale(nn.Module):
         super(Scale, self).__init__()
         self.scale = nn.Parameter(torch.FloatTensor([init_value]))
 
-    def forward(self, input):
-        return input * self.scale
+    def forward(self, x):
+        return x * self.scale
 
 class Model(nn.Module):
     onnx_dynamic = False  # ONNX export parameter
@@ -154,9 +161,9 @@ class Model(nn.Module):
         self.grid = [torch.zeros(1)] * self.nl  # init grid
 
         # init fcos target
-        self.fcos_target = FCOSLabelTarget(self.stride, self.object_sizes_of_interest, self.nc, self.center_sampling_radius)
+        # self.fcos_target = FCOSLabelTarget(self.stride, self.object_sizes_of_interest, self.nc, self.center_sampling_radius)
+        self.fcos_outputs = FCOSOutputs()
 
-        self.names = [str(i) for i in range(self.nc)]  # default names
         for modules in [self.classificationModel, self.regressionModel]:
             for layer in modules.modules():
                 if isinstance(layer, nn.Conv2d):
@@ -182,6 +189,43 @@ class Model(nn.Module):
             if isinstance(layer, nn.BatchNorm2d):
                 layer.eval()
                 
+    # def forward(self, imgs, **kwargs):
+    #     # shape
+    #     _, _, H, W = imgs.shape
+    #     features = self.backbone(imgs)
+    #     loc_preds = []
+    #     cls_preds = []
+    #     centerness = []
+    #     inference_out = []
+    #     # import ipdb;ipdb.set_trace()
+    #     for i, feat in enumerate(features):
+    #         ny, nx = feat.shape[2:4]
+    #         loc_pred = torch.exp(self.scales[i](self.regressionModel(feat)))
+    #         logits, cent = self.classificationModel(feat)
+    #         # import ipdb;ipdb.set_trace()
+    #         loc_preds.append(loc_pred) # bs nx*ny 4
+    #         cls_preds.append(logits) # bs nx*ny nc
+    #         centerness.append(cent) # bs nx*ny 1
+    #         # update grid
+    #         # import ipdb;ipdb.set_trace()
+    #         with torch.no_grad():
+    #             if self.grid[i].shape[2:4] != feat.shape[2:4] or self.onnx_dynamic:
+    #                 self.grid[i] = self._make_grid(nx, ny).to(feat.device) # (1, -1, 2)
+    #                 self.grid[i] = (self.grid[i] + 0.5) * self.stride[i]
+    #         if not self.training:
+    #             # inference cls
+    #             cls_score = logits.sigmoid()
+    #             center_score = cent.sigmoid()
+    #             cls_score *= cent
+    #             # inference reg
+    #             xy1s = self.grid[i].to(loc_pred.device) - loc_pred[...,:2]
+    #             xy2s = self.grid[i].to(loc_pred.device) + loc_pred[..., 2:]
+    #             pred = torch.cat([xy1s, xy2s, cls_score], -1) # bs nx*ny 4+nc
+    #             pred[..., :4] = xyxy2xywh(pred[..., :4])
+    #             inference_out.append(pred)
+    #             inference_out = torch.cat(inference_out, dim=1)
+    #     return inference_out, cls_preds, loc_preds, centerness
+    
     def forward(self, imgs, **kwargs):
         # shape
         _, _, H, W = imgs.shape
@@ -190,117 +234,50 @@ class Model(nn.Module):
         cls_preds = []
         centerness = []
         inference_out = []
+        locations = self.compute_locations(features) # list of shape (np, 2)
         # import ipdb;ipdb.set_trace()
         for i, feat in enumerate(features):
-            ny, nx = feat.shape[2:4]
             loc_pred = torch.exp(self.scales[i](self.regressionModel(feat)))
             logits, cent = self.classificationModel(feat)
             # import ipdb;ipdb.set_trace()
-            loc_preds.append(loc_pred) # bs nx*ny 4
-            cls_preds.append(logits) # bs nx*ny nc
-            centerness.append(cent) # bs nx*ny 1
-            # update grid
-            with torch.no_grad():
-                if self.grid[i].shape[2:4] != feat.shape[2:4] or self.onnx_dynamic:
-                    self.grid[i] = self._make_grid(nx, ny).to(feat.device) # (1, -1, 2)
-                    self.grid[i] = (self.grid[i]) * self.stride[i] + self.stride[i] // 2
-            if not self.training:
-                # inference cls
-                cls_score = logits.sigmoid()
-                center_score = cent.sigmoid()
+            loc_preds.append(loc_pred) # bs 4 nx ny
+            cls_preds.append(logits) # bs nc nx ny
+            centerness.append(cent) # bs 1 nx ny
+        
+        if self.training:
+            gt_instances = kwargs['targets']
+            results, losses = self.fcos_outputs.losses(
+                cls_preds, loc_preds, centerness,
+                locations, gt_instances
+            )
+            return losses
+        else:
+            for level, (loc_pred, cls_pred, cent) in enumerate(zip(loc_preds, cls_preds, centerness)):
+                loc_pred = loc_pred.permute(0, 2, 3, 1).view(loc_pred.shape[0], -1, 4)
+                cls_pred = cls_pred.permute(0, 2, 3, 1).view(cls_pred.shape[0], -1, self.nc)
+                cent = cent.permute(0, 2, 3, 1).view(cent.shape[0], -1, 1)
                 # import ipdb;ipdb.set_trace()
-                cls_score *= center_score
-                # inference reg
-                xy1s = self.grid[i].to(loc_pred.device) - loc_pred[...,:2]
-                xy2s = self.grid[i].to(loc_pred.device) + loc_pred[..., 2:]
-                pred = torch.cat([xy1s, xy2s, cls_score], -1) # bs nx*ny 4+nc
-                pred[..., :4] = xyxy2xywh(pred[..., :4])
+                xy1 = locations[level][None] - loc_pred[:,:,:2]
+                xy2 = locations[level][None] + loc_pred[:,:,2:]
+                cls_score = cls_pred.sigmoid() * cent.sigmoid()
+                # import ipdb;ipdb.set_trace()
+                pred = torch.cat([xy1, xy2, cls_score], dim=2)
+                pred[..., :4] = xyxy2xywh(pred[...,:4])
                 inference_out.append(pred)
-        if inference_out:
             inference_out = torch.cat(inference_out, dim=1)
-        return inference_out, cls_preds, loc_preds, centerness
+            return inference_out
 
-    def loss(self, classifications, regressions, centerness, targets, **kargs):
-        """[summary]
-
-        Args:
-            classifications (List(tensor)): each tensor for a prediction of a single feature map
-            regressions (List(tensor)): [description]
-            grids (List(tensor)): [description]
-            targets (tensor): [description]
-
-        Returns:
-            [dict]: loss dict
-        """
-        alpha = 0.25
-        gamma = 2.0
-
-        # reformat targets to List targets
-        num_images = classifications[0].shape[0]
-        new_targets = [] # taregts for each image
-        for i in range(num_images):
-            new_targets.append(targets[targets[:,0]==i][:,1:])
-        # prepare taregts, labels: List of tensor(bs, np); reg_targets: List of tensor(bs, np, 4)
-        with torch.no_grad():
-            labels, reg_targets = self.fcos_target.prepare_targets(self.grid, new_targets)
-
-        # cat all labels and reg_targets
-        labels = torch.cat(labels, -1)
-        reg_targets = torch.cat(reg_targets, 1)
-        valid_mask = labels >= 0
-        pos_mask = valid_mask & (labels < self.nc) 
-
-        # statistics
-        num_pos = max(reduce_mean(pos_mask.sum()).item(), 1.0)
-
-        # cat all cls_preds, loc_preds and centerness
-        classifications = torch.cat(classifications, 1) #(bs, n, nc)
-        regressions = torch.cat(regressions, 1) # (bs, n, 4)
-        centerness = torch.cat(centerness, 1) # (bs, n, 1)
-
-        # cls loss
-        valid_classifications = classifications[valid_mask]
-        p = torch.sigmoid(valid_classifications)
-        gt_labels_target = F.one_hot(labels[valid_mask].long(), num_classes=self.nc + 1)[
-            :, :-1
-        ].to(valid_classifications.dtype)  # no loss for the last (background) class
-        bce_loss = F.binary_cross_entropy_with_logits(valid_classifications, gt_labels_target, reduction="none")
-        p_t = p * gt_labels_target + (1 - p) * (1 - gt_labels_target)
-        focal_weight = (1 - p_t) ** gamma
-        cls_loss = bce_loss * focal_weight
-        alpha_weight = gt_labels_target * alpha + (1 - alpha) * (1 - gt_labels_target)
-        cls_loss = cls_loss * alpha_weight
-        cls_loss = cls_loss.sum() / num_pos
-
-        # centerness loss
-        def compute_centerness_targets(reg_targets):
-            if reg_targets.shape[0] == 0:
-                return torch.ones(0).to(reg_targets.device)
-            left_right = reg_targets[:, [0, 2]]
-            top_bottom = reg_targets[:, [1, 3]]
-            centerness = (left_right.min(dim=-1)[0] / left_right.max(dim=-1)[0]) * \
-                        (top_bottom.min(dim=-1)[0] / top_bottom.max(dim=-1)[0])
-            return torch.sqrt(centerness)
-
-        
-        with torch.no_grad():
-            masked_reg_targets = reg_targets[pos_mask]
-            centerness_target = compute_centerness_targets(masked_reg_targets)
-        masked_centerness = centerness[pos_mask].view(-1)
-        center_loss = F.binary_cross_entropy_with_logits(masked_centerness, centerness_target, reduction='sum') / num_pos
-        # reg loss
-        denorm = max(reduce_mean(centerness_target.sum()).item(), 1e-6)
-        reg_loss = iou_loss(regressions[pos_mask], masked_reg_targets, centerness_target, loss_type='giou') / denorm
-        # if not torch.isfinite(reg_loss):
-        #     import ipdb;ipdb.set_trace()
-        #     print('err')
-        return {
-            'cls_loss': cls_loss,
-            'reg_loss': reg_loss,
-            'center_loss': center_loss,
-        }
-        
-
+    
+    def compute_locations(self, features):
+        locations = []
+        for level, feature in enumerate(features):
+            h, w = feature.size()[-2:]
+            locations_per_level = compute_locations(
+                h, w, self.stride[level],
+                feature.device
+            )
+            locations.append(locations_per_level)
+        return locations
 
 
 def attempt_load(weights, map_location=None, inplace=True):
@@ -312,7 +289,6 @@ def attempt_load(weights, map_location=None, inplace=True):
         # attempt_download(w)
         ckpt = torch.load(w, map_location=map_location)  # load
         model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().eval())  # FP32 model
-        # model.append(ckpt['model'].float().eval())  # FP32 model
 
     # # Compatibility updates
     # for m in model.modules():
@@ -333,7 +309,6 @@ def attempt_load(weights, map_location=None, inplace=True):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg', type=str, default='fcos.yaml', help='model.yaml')
-    parser.add_argument('--weights', type=str, default='', help='initial weights path')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -341,31 +316,30 @@ if __name__ == '__main__':
     device = select_device(opt.device)
 
     # Create model
-    if opt.weights:
-        model = attempt_load(opt.weights).to(device)
-    else:
-        model = Model(opt.cfg).to(device)
+    model = Model(opt.cfg).to(device)
     # print(model)
     sample = torch.rand(4, 3, 640, 640).to(device)
     cls_id = torch.randint(0, 80,(8,1))
     xy = torch.randint(0, 400, (8, 2))
     wh = torch.randint(30, 120, (8, 2))
-    # labels = []
-    # for i in range(4):
-    #     label = torch.cat([torch.ones(8, 1) * i, cls_id, xy, wh], dim=1).to(device)
-    #     labels.append(label)
-    # labels = torch.cat(labels, dim=0)
-    labels = torch.zeros(0, 6).to(device)
+    labels = []
+    for i in range(4):
+        label = torch.cat([torch.ones(8, 1) * i, cls_id, xy, wh], dim=1).to(device)
+        labels.append(label)
+    labels = torch.cat(labels, dim=0)
     model.train()
     # normalize
     mean = torch.Tensor([103.530, 116.280, 123.675]).view(1, 3, 1, 1).to(device)
     std = torch.Tensor([57.375, 57.120, 58.395]).view(1, 3, 1, 1).to(device)
     sample = (sample - mean) / std
-    pred, cls_preds, loc_preds, centerness = model(sample)
-    grid = model.grid
-    print('cls_preds: ', cls_preds[0].shape)
-    print('loc_preds: ', loc_preds[0].shape)
-    print('centerness', centerness[0].shape)
-    print('grid', grid[0].shape)
-    losses = model.loss(cls_preds, loc_preds, centerness, labels)
-    print(losses)
+
+    # pred, cls_preds, loc_preds, centerness = model(sample)
+    # grid = model.grid
+    # print('cls_preds: ', cls_preds[0].shape)
+    # print('loc_preds: ', loc_preds[0].shape)
+    # print('centerness', centerness[0].shape)
+    # print('grid', grid[0].shape)
+    # losses = model.loss(cls_preds, loc_preds, centerness, labels)
+    # print(losses)
+    loss = model(sample, targets=labels)
+    print(loss)

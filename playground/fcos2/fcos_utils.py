@@ -191,6 +191,22 @@ class FCOSLabelTarget(object):
         inside_gt_bbox_mask = center_bbox.min(-1)[0] > 0
         return inside_gt_bbox_mask
 
+# def iou_loss(preds,targets):
+#     '''
+#     Args:
+#     preds: [n,4] ltrb
+#     targets: [n,4]
+#     '''
+#     lt=torch.min(preds[:,:2],targets[:,:2])
+#     rb=torch.min(preds[:,2:],targets[:,2:])
+#     wh=(rb+lt).clamp(min=0)
+#     overlap=wh[:,0]*wh[:,1]#[n]
+#     area1=(preds[:,2]+preds[:,0])*(preds[:,3]+preds[:,1])
+#     area2=(targets[:,2]+targets[:,0])*(targets[:,3]+targets[:,1])
+#     iou=overlap/(area1+area2-overlap + 1e-6)
+#     loss=-iou.clamp(min=1e-6).log()
+#     return loss.sum()
+    
 
 def iou_loss(pred, target, weight=None, loss_type='iou'):
     pred_left = pred[:, 0]

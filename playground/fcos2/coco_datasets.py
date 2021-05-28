@@ -142,6 +142,7 @@ def load_coco_json(json_file, image_root, extra_annotation_keys=None):
     from pycocotools.coco import COCO
     import contextlib
     import io
+    import pickle
     # timer = Timer()
     # json_file = PathManager.get_local_path(json_file)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -278,11 +279,13 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, json_path, img_path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
         self.img_size = img_size
+        print('img size', self.img_size)
         self.augment = augment
         self.hyp = hyp
         self.image_weights = image_weights
         self.rect = False if image_weights else rect
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
+        print('mosaic', self.mosaic)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.json_path = json_path
@@ -444,8 +447,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img, label, path, shapes = zip(*batch)  # transposed
         for i, l in enumerate(label):
             l[:, 0] = i  # add target image index for build_targets()
-            l[:, [2, 4]] *= img[i].shape[2] # xw
-            l[:, [3, 5]] *= img[i].shape[1] # yh
+            l[:, [2, 4]] *= img[i].shape[2] # w
+            l[:, [3, 5]] *= img[i].shape[1] # h
         return torch.stack(img, 0), torch.cat(label, 0), path, shapes
 
     @staticmethod
@@ -485,6 +488,12 @@ def load_image(self, index):
         assert img is not None, 'Image Not Found ' + path
         h0, w0 = img.shape[:2]  # orig hw
         r = self.img_size / max(h0, w0)  # ratio
+        # min_side, max_side = self.img_size
+        # smallest_side = min(w0,h0)
+        # largest_side=max(w0,h0)
+        # r=min_side/smallest_side
+        # if largest_side*r>max_side:
+        #     r=max_side/largest_side
         if r != 1:  # if sizes are not equal
             img = cv2.resize(img, (int(w0 * r), int(h0 * r)),
                              interpolation=cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR)
@@ -930,8 +939,9 @@ if __name__ == "__main__":
         json_path='/data/dataset/coco/annotations/instances_val2017.json',
         img_path='/data/dataset/coco/val2017',
         augment=True,
-        rect=True,
+        rect=False,
         hyp=hyp,
+        img_size=1024
     )
 
     # get one example
